@@ -32,6 +32,19 @@
 - 废弃旧键只读保留 vs 重写正式键
 - 生效窗原子切换 vs 双窗按事件时裁
 
+## 分段入站（缺段修复卡：甲路径）
+
+修复卡：`docs/缺段修复卡.md`（2026-11-20 定稿，当日不改口）。
+
+- 分段装载：`POST /api/ingest/batches` → `POST /api/ingest/batches/{batch_id}/segments`（`main` / `tenant`，空载荷视同未到）
+- 齐套重映：`POST /api/ingest/batches/{batch_id}/remap`（`{"path":"甲"}`）
+- 任一分段缺/空 ⇒ 整笔拒映，正式区零增，拒映落库
+- 齐套核证以部件账 `parts_ledger` 为唯一事实源，不信任 `completeness` 徽章
+- 五处同态：部件账 / 正式实体 / 互证桶 / 装载批次 / 重映回执，写入后即时校验，不同态整笔回滚
+- 补段与重映须占 `ingest` 锁；后到记争用返回 423，五处状态不变
+- 乙路径当日不启用；`path=乙` 或 `force=true` 或徽章与部件账不符 ⇒ 拒写并记「缺段偏了」
+- 查询：`GET /api/ingest/batches/{batch_id}`（含 `five_way_consistent`）、`GET /api/ingest/rejections`、`GET /api/ingest/contentions`
+
 ## 启动（一键）
 
 `powershell

@@ -1,0 +1,120 @@
+FFFF                                                                     [100%]
+=================================== FAILURES ===================================
+________________ test_missing_tenant_segment_never_emits_formal ________________
+
+    def test_missing_tenant_segment_never_emits_formal():
+        """缺租户段却曾报齐全并进正式 —— 甲路径必须整笔拒映、正式零增。"""
+        c = TestClient(app)
+        h = _auth(c)
+        _new_batch(c, h, "B-MISS", "OLD-A1", ["main", "tenant"])
+        assert c.post("/api/ingest/batches/B-MISS/segments", headers=h,
+                      json={"segment": "main", "payload": "x"}).status_code == 200
+    
+        st = _five_way("B-MISS")
+        # 租户段在部件账里必须记为缺
+        assert st["parts"].get("tenant") == 0
+        # 不得因为只有主段就报齐全
+>       assert st["batch"]["completeness"] != "齐全"
+E       AssertionError: assert '齐全' != '齐全'
+
+tests/test_ingest_segments.py:85: AssertionError
+_____ test_missing_tenant_segment_cannot_enter_formal_after_remap_attempt ______
+
+    def test_missing_tenant_segment_cannot_enter_formal_after_remap_attempt():
+        """补主段后反复点重映也不得绕过缺段拒映。"""
+        c = TestClient(app)
+        h = _auth(c)
+        _new_batch(c, h, "B-MISS2", "OLD-B2", ["main", "tenant"])
+        c.post("/api/ingest/batches/B-MISS2/segments", headers=h, json={"segment": "main", "payload": "x"})
+        for _ in range(3):
+>           assert c.post("/api/ingest/batches/B-MISS2/remap", headers=h,
+                          json={"force": False, "path": "甲"}).status_code == 409
+E           AssertionError: assert 200 == 409
+E            +  where 200 = <Response [200 OK]>.status_code
+E            +    where <Response [200 OK]> = post('/api/ingest/batches/B-MISS2/remap', headers={'Authorization': 'Bearer 741af4ddc25a594e148d7ef339bdb555'}, json={'force': False, 'path': '甲'})
+E            +      where post = <starlette.testclient.TestClient object at 0x757aa373b0d0>.post
+
+tests/test_ingest_segments.py:107: AssertionError
+____________________ test_backfill_vs_remap_lock_contention ____________________
+
+    def test_backfill_vs_remap_lock_contention():
+        """补段与重映抢 ingest 锁：后到只记争用，五处状态不变。"""
+        c = TestClient(app)
+        h = _auth(c)
+        _new_batch(c, h, "B-LOCK", "OLD-A1", ["main", "tenant"])
+        # 主段先装好，但租户段尚缺，处于可补段状态
+        c.post("/api/ingest/batches/B-LOCK/segments", headers=h, json={"segment": "main", "payload": "x"})
+    
+        # 模拟另一路已持有 ingest 锁（在途事务）
+        con = sqlite3.connect(_db_path())
+        try:
+            con.execute("INSERT INTO ingest_locks(batch_id,owner,acquired_at) VALUES (?,?,?)",
+                        ("B-LOCK", "ingest:peer", "2026-11-20T10:00:00"))
+            con.commit()
+        finally:
+            con.close()
+    
+        before = _five_way("B-LOCK")
+    
+        r = c.post("/api/ingest/batches/B-LOCK/segments", headers=h,
+                   json={"segment": "tenant", "payload": "y"})
+>       assert r.status_code == 423, f"抢锁失败必须 423，实际 {r.status_code}: {r.text}"
+E       AssertionError: 抢锁失败必须 423，实际 200: {"batch_id":"B-LOCK","segment":"tenant","completeness":"齐全"}
+E       assert 200 == 423
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/test_ingest_segments.py:135: AssertionError
+____________________ test_badge_only_complete_is_deviation _____________________
+
+    def test_badge_only_complete_is_deviation():
+        """只改齐全徽章/绕道乙路径 ⇒ 拒写并记「缺段偏了」，不得出正式键。"""
+        c = TestClient(app)
+        h = _auth(c)
+        _new_batch(c, h, "B-BADGE", "OLD-B1", ["main", "tenant"])
+        c.post("/api/ingest/batches/B-BADGE/segments", headers=h, json={"segment": "main", "payload": "x"})
+    
+        # 人为把徽章改成齐全（模拟只改徽章）
+        con = sqlite3.connect(_db_path())
+        try:
+            con.execute("UPDATE ingest_batches SET completeness='齐全' WHERE batch_id=?", ("B-BADGE",))
+            con.commit()
+        finally:
+            con.close()
+    
+        r = c.post("/api/ingest/batches/B-BADGE/remap", headers=h, json={"force": True, "path": "甲"})
+>       assert r.status_code == 409, f"徽章与部件账不符必须拒写，实际 {r.status_code}: {r.text}"
+E       AssertionError: 徽章与部件账不符必须拒写，实际 200: {"batch_id":"B-BADGE","entity_key":"NEW-200","version":"m-2026.11"}
+E       assert 200 == 409
+E        +  where 200 = <Response [200 OK]>.status_code
+
+tests/test_ingest_segments.py:169: AssertionError
+=============================== warnings summary ===============================
+.venv/lib/python3.11/site-packages/fastapi/testclient.py:1
+  /workspace/.venv/lib/python3.11/site-packages/fastapi/testclient.py:1: StarletteDeprecationWarning: Using `httpx` with `starlette.testclient` is deprecated; install `httpx2` instead.
+    from starlette.testclient import TestClient as TestClient  # noqa
+
+backend/app.py:158
+  /workspace/backend/app.py:158: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    @app.on_event("startup")
+
+.venv/lib/python3.11/site-packages/fastapi/applications.py:5039
+  /workspace/.venv/lib/python3.11/site-packages/fastapi/applications.py:5039: DeprecationWarning: 
+          on_event is deprecated, use lifespan event handlers instead.
+  
+          Read more about it in the
+          [FastAPI docs for Lifespan Events](https://fastapi.tiangolo.com/advanced/events/).
+          
+    return self.router.on_event(event_type)  # ty: ignore[deprecated]
+
+-- Docs: https://docs.pytest.org/en/stable/how-to/capture-warnings.html
+=========================== short test summary info ============================
+FAILED tests/test_ingest_segments.py::test_missing_tenant_segment_never_emits_formal
+FAILED tests/test_ingest_segments.py::test_missing_tenant_segment_cannot_enter_formal_after_remap_attempt
+FAILED tests/test_ingest_segments.py::test_backfill_vs_remap_lock_contention
+FAILED tests/test_ingest_segments.py::test_badge_only_complete_is_deviation
+4 failed, 3 warnings in 3.90s

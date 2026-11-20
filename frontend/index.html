@@ -54,6 +54,10 @@ createApp({
     const leftTab=ref(0), rightTab=ref(0);
     const versions=ref([]), mappings=ref([]), formal=ref([]), conflicts=ref([]);
     const oldKey=ref('OLD-B1');
+    const batches=ref([]), rejections=ref([]), contentions=ref([]);
+    const batchId=ref('B-101'), batchKey=ref('OLD-B1'), batchTenant=ref('T-01');
+    const segPayloads=ref({main:'', tenant:''});
+    const inspect=ref(null), ingestMsg=ref(''), inspectId=ref('');
     function auth(){return {Authorization:'Bearer '+token.value,'Content-Type':'application/json'};}
     async function login(){
       err.value='';
@@ -80,6 +84,10 @@ createApp({
       formal.value=Array.isArray(f.items)?f.items:[];
       const c=await loadJson('/api/conflicts'); if(c===null) return;
       conflicts.value=Array.isArray(c.items)?c.items:[];
+      const rj=await loadJson('/api/ingest/rejections'); if(rj===null) return;
+      rejections.value=Array.isArray(rj.items)?rj.items:[];
+      const ct=await loadJson('/api/ingest/contentions'); if(ct===null) return;
+      contentions.value=Array.isArray(ct.items)?ct.items:[];
     }
     async function doRemap(){
       actionErr.value='';
@@ -87,8 +95,39 @@ createApp({
       const j=await r.json(); actionErr.value=r.ok?('正式键 '+j.entity_key):(j.detail||'失败');
       await refresh();
     }
+    async function apiPost(url,body){
+      const r=await fetch(url,{method:'POST',headers:auth(),body:JSON.stringify(body||{})});
+      const j=await r.json().catch(()=>({}));
+      return {ok:r.ok,status:r.status,body:j};
+    }
+    async function createBatch(){
+      ingestMsg.value='';
+      const r=await apiPost('/api/ingest/batches',{batch_id:batchId.value,old_key:batchKey.value,tenant:batchTenant.value,declared_segments:['main','tenant']});
+      ingestMsg.value=r.ok?('批次 '+batchId.value+' 已建，待装载分段'):(r.body.detail||'建批失败');
+      await refresh();
+    }
+    async function loadSeg(seg){
+      ingestMsg.value='';
+      const r=await apiPost('/api/ingest/batches/'+batchId.value+'/segments',{segment:seg,payload:segPayloads.value[seg]||''});
+      ingestMsg.value=r.ok?('分段 '+seg+' 已装，齐套='+r.body.completeness):('装载失败 '+r.status+'：'+(r.body.detail||''));
+      await refresh(); await inspectBatch(batchId.value);
+    }
+    async function remapBatch(path){
+      ingestMsg.value='';
+      const r=await apiPost('/api/ingest/batches/'+batchId.value+'/remap',{path:path||'甲'});
+      ingestMsg.value=r.ok?('已出正式键 '+r.body.entity_key+(r.body.replayed?'（重放）':'')):('拒映 '+r.status+'：'+(r.body.detail||''));
+      await refresh(); await inspectBatch(batchId.value);
+    }
+    async function inspectBatch(id){
+      if(!id) return;
+      const j=await loadJson('/api/ingest/batches/'+id);
+      if(j===null||j.detail){ inspect.value=null; return; }
+      inspectId.value=id; inspect.value=j;
+    }
     onMounted(()=>{if(token.value)refresh();});
-    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap};
+    return {token,user,username,password,err,actionErr,leftTab,rightTab,versions,mappings,formal,conflicts,oldKey,login,logout,doRemap,
+      batches,rejections,contentions,batchId,batchKey,batchTenant,segPayloads,inspect,inspectId,ingestMsg,
+      createBatch,loadSeg,remapBatch,inspectBatch};
   },
   template:`
   <div v-if="!token" class="login">
@@ -107,6 +146,8 @@ createApp({
         <div class="tabs">
           <button :class="{on:leftTab===0}" @click="leftTab=0">映射版本</button>
           <button :class="{on:leftTab===1}" @click="leftTab=1">执行重映</button>
+          <button :class="{on:leftTab===2}" @click="leftTab=2">分段装载</button>
+          <button :class="{on:leftTab===3}" @click="leftTab=3">拒映/争用</button>
         </div>
         <div class="box" v-show="leftTab===0">
           <h2>Map Versions</h2>
@@ -123,6 +164,48 @@ createApp({
           <button class="primary" @click="doRemap">重映入正式区</button>
           <div class="err">{{actionErr}}</div>
         </div>
+        <div class="box" v-show="leftTab===2">
+          <h2>分段装载（甲路径：任一段缺则整笔拒映）</h2>
+          <label>batch_id</label><input v-model="batchId"/>
+          <label>old_key</label><input v-model="batchKey"/>
+          <label>tenant</label><input v-model="batchTenant"/>
+          <button class="ghost" @click="createBatch">新建装载批次</button>
+          <div style="margin-top:12px" v-for="seg in ['main','tenant']" :key="seg">
+            <label>{{seg}} 段载荷（留空视为未到）</label>
+            <input v-model="segPayloads[seg]" :placeholder="seg+' 段'"/>
+            <button class="primary" @click="loadSeg(seg)">装载 {{seg}} 段</button>
+          </div>
+          <div style="display:flex;gap:8px;margin-top:10px">
+            <button class="primary" @click="remapBatch('甲')">齐套重映（甲）</button>
+            <button class="ghost" @click="remapBatch('乙')">乙路径（当日禁用，应记偏离）</button>
+          </div>
+          <div class="err">{{ingestMsg}}</div>
+          <div v-if="inspect" style="margin-top:12px">
+            <h2>五处同态 · {{inspectId}}</h2>
+            <div class="pill" :class="inspect.five_way_consistent?'ok':'bad'">
+              五处同态：{{inspect.five_way_consistent?'一致':'不一致'}} ·
+              部件账{{inspect.ledger_complete?'齐全':'缺段'}} ·
+              徽章「{{inspect.batch.completeness}}」 · 状态{{inspect.batch.status}}
+            </div>
+            <table style="margin-top:8px"><thead><tr><th>部件</th><th>present</th></tr></thead>
+            <tbody><tr v-for="p in inspect.parts" :key="p.part"><td>{{p.part}}</td><td :class="p.present?'ok':'bad'">{{p.present}}</td></tr></tbody></table>
+            <div class="pill" style="margin-top:8px">
+              正式 {{inspect.formal.length}} · 互证桶 {{inspect.attest.length}} · 回执 {{inspect.receipt.length}}
+            </div>
+            <div v-if="inspect.missing_required.length || inspect.missing_declared.length" class="err">
+              缺必需段 {{inspect.missing_required.join(',')||'无'}}；缺声明段 {{inspect.missing_declared.join(',')||'无'}}
+            </div>
+            <button class="ghost" style="margin-top:8px" @click="inspectBatch(inspectId)">刷新核对</button>
+          </div>
+        </div>
+        <div class="box" v-show="leftTab===3">
+          <h2>拒映 / 缺段偏了</h2>
+          <table><thead><tr><th>batch</th><th>old</th><th>reason</th><th>status</th><th>detail</th></tr></thead>
+          <tbody><tr v-for="r in rejections" :key="r.id"><td>{{r.batch_id}}</td><td>{{r.old_key}}</td><td>{{r.reason}}</td><td :class="r.status==='缺段偏了'?'bad':''">{{r.status}}</td><td>{{r.detail}}</td></tr></tbody></table>
+          <h2 style="margin-top:14px">抢锁争用</h2>
+          <table><thead><tr><th>batch</th><th>contender</th><th>holder</th><th>at</th></tr></thead>
+          <tbody><tr v-for="r in contentions" :key="r.id"><td>{{r.batch_id}}</td><td>{{r.contender}}</td><td>{{r.holder}}</td><td>{{r.created_at}}</td></tr></tbody></table>
+        </div>
       </div>
       <div class="bridge"></div>
       <div class="pane">
@@ -132,8 +215,8 @@ createApp({
         </div>
         <div class="box" v-show="rightTab===0">
           <h2>Formal Zone</h2>
-          <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>at</th></tr></thead>
-          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.created_at}}</td></tr></tbody></table>
+          <table><thead><tr><th>entity</th><th>from</th><th>ver</th><th>batch</th><th>at</th></tr></thead>
+          <tbody><tr v-for="f in formal" :key="f.id"><td class="ok">{{f.entity_key}}</td><td>{{f.mapped_from}}</td><td>{{f.version}}</td><td>{{f.batch_id||'—'}}</td><td>{{f.created_at}}</td></tr></tbody></table>
         </div>
         <div class="box" v-show="rightTab===1">
           <h2>Conflicts</h2>
